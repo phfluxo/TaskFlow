@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    container_name: github_task_bot
+    volumes:
+      - .:/app
+      - /app/.venv
+    env_file:
+      - .env
+    command: watchmedo auto-restart --directory=. --pattern="*.py" --recursive python main.py
+    restart: unless-stopped

@@ -1,0 +1,23 @@
+[project]
+name = "github-discord-bot"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "phfluxo",email = "ph@fluxo.tec.br"}
+]
+requires-python = ">=3.14"
+dependencies = [
+    "discord-py (>=2.7.1,<3.0.0)",
+    "pygithub (>=2.9.1,<3.0.0)",
+    "dotenv (>=0.9.9,<0.10.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "watchdog (>=6.0.0,<7.0.0)"
+]
