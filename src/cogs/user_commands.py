@@ -1,23 +1,61 @@
 import os
 import json
+import sqlite3
 import discord
 from discord.ext import commands
+from src.utils.permissions import is_staff
 
-USER_FILE = "users.json"
+# Configuração do caminho do banco de dados dentro do volume persistente
+DB_DIR = "data"
+DB_FILE = os.path.join(DB_DIR, "users.db")
 
-# --- FUNÇÕES AUXILIARES DE PERSISTÊNCIA ---
+# --- FUNÇÕES AUXILIARES DE PERSISTÊNCIA (SQLITE) ---
+def init_db() -> None:
+    """Garante que o diretório data/ e a tabela de usuários existam no banco."""
+    os.makedirs(DB_DIR, exist_ok=True)
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                discord_name TEXT PRIMARY KEY,
+                github_name TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
 def get_users() -> dict:
-    if not os.path.exists(USER_FILE):
-        return {}
-    with open(USER_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    """Busca todos os usuários e retorna no formato de dicionário {discord: github}."""
+    init_db()
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT discord_name, github_name FROM users")
+        return {row[0]: row[1] for row in cursor.fetchall()}
 
-def save_users(dados: dict) -> None:
-    with open(USER_FILE, "w", encoding="utf-8") as f:
-        json.dump(dados, f, indent=4, ensure_ascii=False)
+def add_user(discord_name: str, github_name: str, overwrite: bool = False) -> bool:
+    """Adiciona um usuário. Retorna True se adicionado/atualizado e False se ignorado."""
+    init_db()
+    with sqlite3.connect(DB_FILE) as conn:
+        try:
+            if overwrite:
+                conn.execute(
+                    "INSERT OR REPLACE INTO users (discord_name, github_name) VALUES (?, ?)", 
+                    (discord_name, github_name)
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO users (discord_name, github_name) VALUES (?, ?)", 
+                    (discord_name, github_name)
+                )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_users(names_to_delete: list[str]) -> None:
+    """Remove múltiplos usuários de uma única vez do banco de dados."""
+    init_db()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.executemany("DELETE FROM users WHERE discord_name = ?", [(name,) for name in names_to_delete])
+        conn.commit()
 
 
 # --- MODAL DE CADASTRO INDIVIDUAL ---
@@ -30,11 +68,10 @@ class RegisterModal(discord.ui.Modal, title="Vincular Conta do GitHub"):
     )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        users = get_users()
         discord_name = interaction.user.name
         
-        users[discord_name] = self.github_username.value
-        save_users(users)
+        # Salva forçando o overwrite caso ele decida atualizar o nick dele
+        add_user(discord_name, self.github_username.value, overwrite=True)
         await interaction.response.send_message(
             f"✅ Sucesso! Seu perfil foi vinculado ao GitHub `{self.github_username.value}`.", 
             ephemeral=True
@@ -69,19 +106,15 @@ class BulkRegisterModal(discord.ui.Modal, title="Cadastro em Massa"):
             )
             return
 
-        users = get_users()
         added = 0
         ignored = 0
 
-        for discord, github in zip(discord_list, github_list):
-            # Condição: Se já existir no JSON, ignora e passa para o próximo
-            if discord in users:
+        for discord_name, github_name in zip(discord_list, github_list):
+            # Se já existir, a restrição UNIQUE do SQLite impede e retorna False
+            if add_user(discord_name, github_name, overwrite=False):
+                added += 1
+            else:
                 ignored += 1
-                continue
-            users[discord] = github
-            added += 1
-            
-        save_users(users)
         
         await interaction.response.send_message(
             f"✅ **Cadastro em massa concluído!**\n"
@@ -102,9 +135,7 @@ class ImportJsonModal(discord.ui.Modal, title="Importar Usuários via JSON"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
-            # Converte o texto recebido em um dicionário Python
             new_users = json.loads(self.json_data.value)
-            
             if not isinstance(new_users, dict):
                 await interaction.response.send_message(
                     "❌ **Erro de formato!** O JSON enviado precisa ser um dicionário/objeto estruturado em `{ \"chave\": \"valor\" }`.",
@@ -118,19 +149,14 @@ class ImportJsonModal(discord.ui.Modal, title="Importar Usuários via JSON"):
             )
             return
 
-        users = get_users()
         added = 0
         ignored = 0
 
-        for discord, github in new_users.items():
-            # Condição: Se já existir no JSON, ignora e passa para o próximo
-            if discord in users:
+        for discord_name, github_name in new_users.items():
+            if add_user(discord_name, str(github_name), overwrite=False):
+                added += 1
+            else:
                 ignored += 1
-                continue
-            users[discord] = str(github)
-            added += 1
-
-        save_users(users)
 
         await interaction.response.send_message(
             f"✅ **Importação JSON concluída!**\n"
@@ -148,12 +174,7 @@ class DeleteConfirmationView(discord.ui.View):
 
     @discord.ui.button(label="Sim, Deletar", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        users = get_users()
-        for name in self.names_to_delete:
-            if name in users:
-                del users[name]
-        save_users(users)
-        
+        delete_users(self.names_to_delete)
         await interaction.response.edit_message(
             content=f"🗑️ Os seguintes cadastros foram excluídos: **{', '.join(self.names_to_delete)}**", 
             view=None
@@ -166,6 +187,7 @@ class DeleteConfirmationView(discord.ui.View):
             content="### 👥 Gerenciador de Usuários Cadastrados\nSelecione um ou mais usuários abaixo para deletar:", 
             view=view
         )
+
 
 class ListUsersView(discord.ui.View):
     def __init__(self, users_dict: dict):
@@ -194,12 +216,10 @@ class ListUsersView(discord.ui.View):
     @discord.ui.button(label="Deletar Selecionados", style=discord.ButtonStyle.danger, row=1)
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.selected:
-            # Corrigido para responder diretamente à interação do botão de forma limpa
             await interaction.response.send_message("⚠️ Selecione pelo menos um usuário na lista acima!", ephemeral=True)
             return
 
         confirm_view = DeleteConfirmationView(self.selected)
-        # 🔥 A MÁGICA AQUI: edit_message faz o dropdown sumir na hora e dá lugar aos botões de sim/não
         await interaction.response.edit_message(
             content=f"⚠️ **Confirmação:** Tem certeza de que deseja apagar o vínculo de: **{', '.join(self.selected)}**?",
             view=confirm_view
@@ -211,7 +231,7 @@ class UserCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.hybrid_command(name="register", description="Vincula seu usuário do GitHub ao sistema do bot")
+    @commands.hybrid_command(name="registrar-se", description="Vincula seu usuário do GitHub ao sistema do bot")
     async def register(self, ctx: commands.Context) -> None:
         if ctx.interaction:
             users = get_users()
@@ -220,56 +240,36 @@ class UserCog(commands.Cog):
                 return
             await ctx.interaction.response.send_modal(RegisterModal())
         else:
-            await ctx.send("⚠️ Por limitações do Discord, use este comando como Slash Command: `/register`.")
+            await ctx.send("⚠️ Por limitações do Discord, use este comando as Slash Command: `/registrar-se`.")
 
-    @commands.hybrid_command(name="unregister", description="Remove o seu cadastro do sistema do bot")
+    @commands.hybrid_command(name="desregistrar-se", description="Remove o seu cadastro do sistema do bot")
     async def unregister(self, ctx: commands.Context) -> None:
         users = get_users()
         user_name = ctx.author.name
         if user_name in users:
-            del users[user_name]
-            save_users(users)
+            delete_users([user_name])
             await ctx.send("✅ Seu cadastro foi removido com sucesso.", ephemeral=True)
         else:
             await ctx.send("❌ Você não foi encontrado no nosso banco de cadastros.", ephemeral=True)
 
-    @commands.hybrid_command(name="register_users", description="[Admin] Cadastra vários usuários de uma vez (Vírgulas)")
-    @commands.has_permissions(administrator=True)
+    @commands.hybrid_command(name="cadastrar_usuarios_formulario", description="[Admin] Cadastra vários usuários de uma vez (Vírgulas)")
+    @is_staff()
     async def register_users(self, ctx: commands.Context) -> None:
         if ctx.interaction:
             await ctx.interaction.response.send_modal(BulkRegisterModal())
         else:
-            await ctx.send("⚠️ Por limitações do Discord, use este comando como Slash Command: `/register_users`.")
+            await ctx.send("⚠️ Por limitações do Discord, use este comando as Slash Command: `/cadastrar_usuarios_formulario`.")
 
-    @commands.hybrid_command(name="import_users_json", description="[Admin] Importa um dicionário JSON bruto contendo os mapeamentos de usuários")
-    @commands.has_permissions(administrator=True)
+    @commands.hybrid_command(name="importar_usuarios_json", description="[Admin] Importa um dicionário JSON bruto contendo os mapeamentos de usuários")
+    @is_staff()
     async def import_users_json(self, ctx: commands.Context) -> None:
         if ctx.interaction:
             await ctx.interaction.response.send_modal(ImportJsonModal())
         else:
-            await ctx.send("⚠️ Por limitações do Discord, use este comando como Slash Command: `/import_users_json`.")
+            await ctx.send("⚠️ Por limitações do Discord, use este comando as Slash Command: `/importar_usuarios_json`.")
 
-    @commands.hybrid_command(name="print_users", description="[Admin] Exibe o conteúdo atual do usuarios.json para backup")
-    @commands.has_permissions(administrator=True)
-    async def print_users(self, ctx: commands.Context) -> None:
-        users = get_users()
-        if not users:
-            await ctx.send("📂 O banco de dados está vazio. Nenhum usuário cadastrado.", ephemeral=True)
-            return
-
-        # Converte o dicionário atual de volta para string formatada em JSON
-        json_formatted = json.dumps(users, indent=4, ensure_ascii=False)
-        
-        backup_message = (
-            "### 💾 Backup de Usuários Cadastrados (`users.json`)\n"
-            "Copie o bloco abaixo se desejar transferir ou salvar estes dados:\n"
-            f"```json\n{json_formatted}\n```"
-        )
-        
-        await ctx.send(backup_message, ephemeral=True)
-
-    @commands.hybrid_command(name="list_users", description="[Admin] Lista e remove usuários cadastrados")
-    @commands.has_permissions(administrator=True)
+    @commands.hybrid_command(name="listar_usuarios", description="[Admin] Lista e remove usuários cadastrados")
+    @is_staff()
     async def list_users(self, ctx: commands.Context) -> None:
         users = get_users()
         if not users:
@@ -282,6 +282,21 @@ class UserCog(commands.Cog):
             view=view, 
             ephemeral=True
         )
+
+    @commands.hybrid_command(name="print_users", description="[Admin] Exibe o conteúdo atual do banco para backup (Formato JSON)")
+    @is_staff()
+    async def print_users(self, ctx: commands.Context) -> None:
+        users = get_users()
+        if not users:
+            await ctx.send("📂 O banco de dados está vazio. Nenhum usuário cadastrado.", ephemeral=True)
+            return
+
+        json_formatted = json.dumps(users, indent=4, ensure_ascii=False)
+        backup_message = (
+            "### 💾 Backup de Usuários Cadastrados (`users.db` -> JSON)\n"
+            "Copie o bloco abaixo se desejar transferir ou salvar estes dados:\n"
+            f"```json\n{json_formatted}\n```")
+        await ctx.send(backup_message, ephemeral=True)
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(UserCog(bot))

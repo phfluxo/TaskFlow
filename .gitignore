@@ -3,7 +3,7 @@
 venv/
 env/
 .env
-users.json
+users.db
 
 # Python
 __pycache__/

@@ -5,6 +5,7 @@ services:
     volumes:
       - .:/app
       - /app/.venv
+      - ./data:/app/data
     env_file:
       - .env
     command: watchmedo auto-restart --directory=. --pattern="*.py" --recursive python main.py

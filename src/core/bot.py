@@ -1,9 +1,11 @@
 import os
 import json
 import asyncio
+import traceback
 import discord
 from discord.ext import commands
 from github import Github
+from src.utils.permissions import PERMITTED_ROLES
 
 class GitHubTaskBot(commands.Bot):
     def __init__(self) -> None:
@@ -70,3 +72,40 @@ class GitHubTaskBot(commands.Bot):
             except json.JSONDecodeError:
                 print("❌ Erro: Formato JSON inválido na variável GIT_REPOS.")
                 self.repositorios_disponiveis = []
+
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        """Captura e trata erros de TODOS os comandos e Cogs do sistema."""
+        
+        if hasattr(error, "original"):
+            error = error.original
+
+        if isinstance(error, commands.MissingPermissions):
+            mensagem_erro = (
+                "❌ **Acesso Negado!**\n"
+                "Você não tem os privilégios necessários para executar este comando.\n"
+                f"👉 Este comando é restrito a **Administradores** ou membros com os cargos **{', '.join(PERMITTED_ROLES)}**."
+            )
+            await self._enviar_resposta_erro(ctx, mensagem_erro)
+            return
+
+        # 2. Tratamento para comando não encontrado (Evita logs se digitarem algo errado com prefixo !)
+        if isinstance(error, commands.CommandNotFound):
+            return
+
+        # 3. Qualquer outro erro não previsto (Gera log detalhado no terminal para você debugar)
+        print(f"🔴 Erro não tratado no comando '{ctx.command}': {error}")
+        traceback.print_exception(type(error), error, error.__traceback__)
+
+    # --- FUNÇÃO AUXILIAR DE RESPOSTA ---
+    async def _enviar_resposta_erro(self, ctx: commands.Context, texto: str) -> None:
+        """Garante que a resposta vá como Slash (ephemeral) ou mensagem normal com auto-delete."""
+        if ctx.interaction:
+            # Se for um Slash Command, responde de forma privada (apenas o usuário vê)
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(texto, ephemeral=True)
+            else:
+                await ctx.interaction.followup.send(texto, ephemeral=True)
+        else:
+            # Se for comando por texto antigo (!print_users), manda no chat e apaga após 15 segundos
+            await ctx.send(texto, delete_after=15)
