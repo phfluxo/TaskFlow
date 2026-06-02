@@ -4,20 +4,11 @@ import discord
 import requests  # Utilizado para a API GraphQL do GitHub
 from discord.ext import commands
 from github import Github
+from src.cogs.user_commands import get_users
 from src.templates.task_layouts import build_standard_template
 
 # Inicializa o cliente do GitHub
 gh = Github(os.getenv('GITHUB_TOKEN'))
-USER_FILE = "users.json"
-
-def get_users() -> dict:
-    if not os.path.exists(USER_FILE):
-        return {}
-    with open(USER_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
 
 # --- FUNÇÃO AUXILIAR: VINCIULAÇÃO COM PROJECTS V2 (GRAPHQL) ---
 def link_to_project_v2(issue_node_id: str) -> None:
